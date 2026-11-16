@@ -396,24 +396,48 @@ const Mic = {
     this.an = ac.createAnalyser(); this.an.fftSize = 2048; this.an.smoothingTimeConstant = 0;
     src.connect(hp); hp.connect(lp); lp.connect(this.pre); this.pre.connect(this.an);
     this.sr = ac.sampleRate; this.buf = new Float32Array(2048);
-    const tauMax = Math.min(Math.floor(this.sr / 70), 2048 - 1024 - 2);
+    const tauMax = Math.min(Math.floor(this.sr / 70), 2048 - this.W - 2);
     this.d = new Float32Array(tauMax + 2); this.c = new Float32Array(tauMax + 2);
-    this.floor = 0; this.hist = [];
+    this.floor = 0; this.hist = []; this.mins = []; this.blk = null; this.pending = null; this.cand = null;
+    this.ring = new Float32Array(8192); this.ringN = 0; this.hop = 0; this.lastSus = 0; this.lastT = 0;
+    // Listen on the audio thread: every sample reaches the detector even when the fire graphics slow the screen down.
+    this.useWorklet = false;
+    try {
+      if (ac.audioWorklet && window.AudioWorkletNode){
+        if (!Mic.wl){
+          const code = "class T extends AudioWorkletProcessor{constructor(){super();this.b=new Float32Array(512);this.n=0;}" +
+            "process(i){const c=i[0]&&i[0][0];if(c){for(let k=0;k<c.length;k++){this.b[this.n++]=c[k];if(this.n===512){" +
+            "this.port.postMessage({b:this.b,t:currentTime+k/sampleRate},[this.b.buffer]);this.b=new Float32Array(512);this.n=0;}}}return true;}}" +
+            "registerProcessor('ck-tap',T);";
+          await ac.audioWorklet.addModule(URL.createObjectURL(new Blob([code], {type:'application/javascript'})));
+          Mic.wl = true;
+        }
+        this.node = new AudioWorkletNode(ac, 'ck-tap', {numberOfInputs:1, numberOfOutputs:1, outputChannelCount:[1]});
+        this.mute = ac.createGain(); this.mute.gain.value = 0;
+        this.pre.connect(this.node); this.node.connect(this.mute); this.mute.connect(ac.destination);
+        this.node.port.onmessage = e => this.feed(e.data.b, e.data.t);
+        this.useWorklet = true;
+      }
+    } catch(e){ this.useWorklet = false; }
     this.on = true;
     return true;
   },
   async restart(){ this.stop(); return this.start(); },
   stop(){
     try { this.stream && this.stream.getTracks().forEach(t => t.stop()); } catch(e){}
-    this.on = false; this.stream = null; this.an = null;
+    try { if (this.node){ this.node.port.onmessage = null; this.node.disconnect(); } } catch(e){}
+    this.on = false; this.stream = null; this.an = null; this.node = null;
     try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch(e){}
   },
+  W: 800,
+  // YIN pitch detection on the NEWEST audio in the buffer (older versions read slightly stale audio,
+  // which could still contain the previous note when you play notes back to back)
   yin(){
-    const buf = this.buf, sr = this.sr, W = 1024, d = this.d, c = this.c;
-    const tauMax = d.length - 2, tauMin = Math.max(2, Math.floor(sr / 2200));
+    const buf = this.buf, sr = this.sr, W = this.W, d = this.d, c = this.c;
+    const tauMax = d.length - 2, tauMin = Math.max(2, Math.floor(sr / 2200)), o = buf.length - W - tauMax - 1;
     for (let tau = 1; tau <= tauMax; tau++){
       let s = 0;
-      for (let j = 0; j < W; j++){ const v = buf[j] - buf[j + tau]; s += v * v; }
+      for (let j = 0; j < W; j++){ const v = buf[o + j] - buf[o + j + tau]; s += v * v; }
       d[tau] = s;
     }
     let run = 0; c[0] = 1;
@@ -431,38 +455,78 @@ const Mic = {
     this.lastMidi = m; this.heard = m; this.heardAt = performance.now();
     if (this.onNote) this.onNote(m, t0, conf == null ? 0.9 : conf);
   },
-  tick(now){
-    if (!this.on || !this.an) return;
-    this.an.getFloatTimeDomainData(this.buf);
-    let s = 0; const b = this.buf;
-    for (let i = 0; i < b.length; i++) s += b[i] * b[i];
-    const rms = Math.sqrt(s / b.length);
-    this.rms = rms; this.level = Math.max(rms, this.level * 0.88);
-    // track the room's background level: drops fast, rises slowly (so notes don't count as "background")
-    if (!this.floor) this.floor = rms || 0.0005;
-    else if (rms < this.floor) this.floor = this.floor * 0.85 + rms * 0.15;
-    else this.floor = this.floor * 0.9993 + rms * 0.0007;
-    // the gate sits just above the background; higher sensitivity = closer to it
-    this.gate = Math.max(0.0008, this.floor * lerp(6, 1.6, clamp(cfg.sens, 0, 100) / 100));
-    const quiet = now < this.ignoreUntil;
-    const h = this.hist;
-    const minRecent = h.length ? Math.min.apply(null, h.slice(-4)) : 0;
-    if (!quiet && !this.pending && rms > this.gate && rms > minRecent * 1.22 + this.floor * 0.25 && now - this.lastOnset > 85){
-      this.pending = {t0:now, f:[], c:[]}; this.lastOnset = now; this.cand = null;
+  // audio-thread path: 512-sample chunks arrive with their audio-clock time
+  feed(b, tEnd){
+    if (!this.on) return;
+    let off = null;
+    try { const ts = ac.getOutputTimestamp && ac.getOutputTimestamp(); if (ts && ts.performanceTime) off = ts.performanceTime - ts.contextTime * 1000; } catch(e){}
+    if (off == null) off = performance.now() - ac.currentTime * 1000;
+    const R = this.ring, L = R.length, sr = this.sr, t0 = tEnd - (b.length - 1) / sr;
+    for (let i = 0; i < b.length; i++){
+      R[this.ringN % L] = b[i]; this.ringN++;
+      if (++this.hop >= 256 && this.ringN >= 2048){
+        this.hop = 0;
+        const N = this.ringN;
+        for (let k = 0; k < 2048; k++) this.buf[k] = R[(N - 2048 + k) % L];
+        this.analyze((t0 + i / sr) * 1000 + off, 1024);
+      }
     }
-    h.push(rms); if (h.length > 6) h.shift();
+  },
+  // fallback path for browsers without AudioWorklet
+  tick(now){
+    if (!this.on || !this.an || this.useWorklet) return;
+    this.an.getFloatTimeDomainData(this.buf);
+    this.analyze(now, 2048);
+  },
+  analyze(now, rmsLen){
+    const b = this.buf;
+    let s = 0;
+    for (let i = b.length - rmsLen; i < b.length; i++) s += b[i] * b[i];
+    const rms = Math.sqrt(s / rmsLen);
+    const dtMs = this.lastT ? clamp(now - this.lastT, 1, 100) : 16; this.lastT = now;
+    this.rms = rms; this.level = Math.max(rms, this.level * Math.pow(0.88, dtMs / 16));
+    // Background level = the quietest 100 ms stretch in the last 3 seconds (doesn't creep up while you keep playing)
+    if (!this.blk || now - this.blk.t0 > 100){
+      if (this.blk){ this.mins.push(this.blk.min); if (this.mins.length > 30) this.mins.shift(); }
+      this.blk = {t0:now, min:rms};
+    } else if (rms < this.blk.min) this.blk.min = rms;
+    this.floor = Math.max(0.0002, this.mins.length ? Math.min(this.blk.min, Math.min.apply(null, this.mins)) : rms);
+    // gate sits just above the background; higher sensitivity = closer to it
+    const sens = clamp(cfg.sens, 0, 100) / 100;
+    let gate = Math.max(0.0006, this.floor * lerp(4, 1.4, sens));
+    // and never asks for more than a small slice of how loud your piano was during tuning
+    if (cfg.notePeak) gate = Math.min(gate, Math.max(cfg.notePeak * lerp(0.15, 0.04, sens), this.floor * 1.3));
+    this.gate = gate;
+    const quiet = now < this.ignoreUntil;
+    // Attack detection. After a note starts we wait for it to peak and begin fading ("armed"),
+    // then a new note = a jump of 25% above the lowest point since. One key press = one note.
+    if (this.armed === undefined){ this.armed = true; this.valley = rms; this.peak = 0; }
+    if (!this.armed){
+      if (rms > this.peak) this.peak = rms;
+      if (rms < this.peak * 0.82 || rms < gate || now - this.lastOnset > 400){ this.armed = true; this.valley = rms; }
+    } else if (rms < this.valley) this.valley = rms;
+    if (!quiet && !this.pending && this.armed && rms > gate && rms > this.valley * 1.25 + this.floor * 0.25 && now - this.lastOnset > 70){
+      this.pending = {t0:now, f:[], c:[]}; this.lastOnset = now; this.cand = null;
+      this.armed = false; this.peak = rms;
+    }
     if (this.pending){
-      const p = this.pending;
-      if (now - p.t0 >= 20){ const r = this.yin(); if (r && r.conf > 0.7 && r.f > 70 && r.f < 2200){ p.f.push(r.f); p.c.push(r.conf); } }
-      if (p.f.length >= 3 || (p.f.length >= 2 && now - p.t0 > 70) || now - p.t0 > 170){
+      const p = this.pending, age = now - p.t0;
+      // wait ~30 ms so the analysis window is mostly the new note, then take up to 3 readings
+      if (age >= 30 && (!p.last || now - p.last >= 9)){
+        p.last = now;
+        const r = this.yin();
+        if (r && r.conf > 0.68 && r.f > 70 && r.f < 2200){ p.f.push(r.f); p.c.push(r.conf); }
+      }
+      if (p.f.length >= 3 || (p.f.length >= 2 && age > 80) || (p.f.length === 1 && p.c[0] > 0.85 && age > 110) || age > 180){
         if (p.f.length){
-          const idx = p.f.map((f, i) => i).sort((a, b) => p.f[a] - p.f[b])[Math.floor(p.f.length / 2)];
+          const idx = p.f.map((f, i) => i).sort((a, c) => p.f[a] - p.f[c])[Math.floor(p.f.length / 2)];
           this.emit(69 + 12 * Math.log2(p.f[idx] / 440), p.t0, Math.max.apply(null, p.c));
         }
         this.pending = null;
       }
-    } else if (!quiet && rms > this.gate * 1.3 && (this.frame++ % 3 === 0)){
+    } else if (!quiet && rms > gate * 1.3 && now - this.lastSus > 30){
       // a new pitch while the sound keeps going (no clear attack)
+      this.lastSus = now;
       const r = this.yin();
       if (r && r.conf > 0.88 && r.f > 70 && r.f < 2200){
         const m = 69 + 12 * Math.log2(r.f / 440);
@@ -1440,7 +1504,6 @@ function draw(now, dt){
 let last = performance.now();
 function frame(now){
   const dt = Math.min(0.05, (now - last) / 1000); last = now;
-  Mic.tick(now);
   if (setupOpen) setupTick();
   if (!play.hidden && G && bg){
     update(dt); updateTorches(dt, now); stepParticles(dt);
@@ -1498,7 +1561,7 @@ document.addEventListener('visibilitychange', () => { if (document.hidden && sta
 /* =====================================================================
    MIC SETUP / TUNING
    ===================================================================== */
-let setupOpen = false, setupStep = 0, quietSamples = [], quietUntil = 0, tuneHits = [];
+let setupOpen = false, setupStep = 0, quietSamples = [], quietUntil = 0, tuneHits = [], tunePeaks = [], tunePeak = 0;
 const setupClosed = () => !setupOpen;
 const TUNE = [60, 64, 67];
 function setSteps(n){ document.querySelectorAll('.steps span').forEach((el, i) => el.classList.toggle('on', i < n)); }
@@ -1567,7 +1630,7 @@ $('setupClose').addEventListener('click', () => {
   if (setupStep === 9 && Mic.on && cfg.input === 'mic'){ /* keep listening */ }
   closeSetup();
 });
-$('setupRetune').addEventListener('click', () => { setupStep = 2; tuneHits = []; renderSetup(); });
+$('setupRetune').addEventListener('click', () => { setupStep = 2; tuneHits = []; tunePeaks = []; tunePeak = 0; renderSetup(); });
 // long-press-free way to turn listening off: button inside adv
 (() => {
   const off = document.createElement('button'); off.type = 'button'; off.className = 'chip'; off.textContent = 'Turn listening off';
@@ -1589,11 +1652,12 @@ function setupTick(){
     quietSamples.push(Mic.rms);
     if (performance.now() > quietUntil){
       const avg = quietSamples.reduce((a,b) => a + b, 0) / Math.max(1, quietSamples.length);
-      Mic.floor = Math.max(0.0003, avg); // start the background level from the room measurement
+      Mic.mins = [Math.max(0.0003, avg)]; // start the background level from the room measurement
       syncAdv(); $('sens').value = cfg.sens;
-      setupStep = 2; tuneHits = []; renderSetup();
+      setupStep = 2; tuneHits = []; tunePeaks = []; tunePeak = 0; renderSetup();
     }
   }
+  if (setupStep >= 2 && setupStep <= 4) tunePeak = Math.max(tunePeak, Mic.rms);
   const hd = $('setupHeard'), age = performance.now() - Mic.heardAt;
   if (Mic.heard != null && age < 1600){
     const m = Math.round(Mic.heard - (setupStep >= 2 && setupStep <= 4 ? 0 : cfg.offset));
@@ -1606,16 +1670,22 @@ function setupNote(m){
   let delta = m - want;
   delta = ((delta % 12) + 18) % 12 - 6; // nearest equivalent, octave-agnostic
   tuneHits.push(delta);
-  if (setupStep < 4){ setupStep++; renderSetup(); return; }
+  const pk = () => { tunePeaks.push(tunePeak); tunePeak = 0; };
+  if (setupStep < 4){ setTimeout(pk, 200); setupStep++; renderSetup(); return; }
   const spread = Math.max(...tuneHits) - Math.min(...tuneHits);
   if (spread > 0.8){
     $('setupMsg').innerHTML = 'Hmm, those didn\'t sound like C, E and G. Let\'s try again. Play <strong>C</strong>, the leftmost key.';
-    setupStep = 2; tuneHits = [];
+    setupStep = 2; tuneHits = []; tunePeaks = []; tunePeak = 0;
     return;
   }
   const off = tuneHits.slice().sort((a,b) => a - b)[1];
   cfg.offset = off; cfg.tuned = true; saveCfg();
-  setupStep = 5; renderSetup();
+  setTimeout(() => {
+    pk();
+    const peaks = tunePeaks.filter(v => v > 0);
+    if (peaks.length) cfg.notePeak = Math.min.apply(null, peaks);
+    saveCfg(); setupStep = 5; renderSetup();
+  }, 200);
 }
 
 /* =====================================================================
@@ -1652,6 +1722,7 @@ if (cfg.input === 'mic') cfg.input = cfg.tuned ? 'mic' : 'tap';
 syncControls();
 renderMenu();
 requestAnimationFrame(frame);
+setInterval(() => Mic.tick(performance.now()), 10);
 
 // test hook (used for automated checks; harmless otherwise)
 window.__ck = {get state(){ return state; }, played, Mic, cfg, openSong, begin};
