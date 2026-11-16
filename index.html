@@ -197,7 +197,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--torch);outline-
       <div class="heard" id="setupHeard">–</div>
       <div class="levelwrap">
         <div class="level"><i id="setupLevel"></i><em id="setupGate"></em></div>
-        <small id="setupSmall">Mic level. The white line is where it starts listening.</small>
+        <small id="setupSmall">Mic level. Notes need to pass the white line. It moves with the room's background noise.</small>
       </div>
     </div>
     <div class="actions" style="display:flex;gap:8px;flex-wrap:wrap">
@@ -310,9 +310,9 @@ const store = {
   get(k, d){ try { const v = localStorage.getItem('ckl:' + k); return v == null ? d : JSON.parse(v); } catch(e){ return d; } },
   set(k, v){ try { localStorage.setItem('ckl:' + k, JSON.stringify(v)); } catch(e){} }
 };
-const cfg = Object.assign({wait:false, input:'tap', tempo:0.7, latency:90, sens:55, offset:0, tuned:false}, store.get('cfg', {}));
+const cfg = Object.assign({wait:false, input:'tap', tempo:0.7, latency:90, sens:85, boost:true, offset:0, tuned:false, v:2}, store.get('cfg', {}));
+if (cfg.v !== 2){ cfg.sens = 85; cfg.boost = true; cfg.v = 2; }
 const saveCfg = () => store.set('cfg', cfg);
-const gateFromSens = () => 0.004 + Math.pow(1 - cfg.sens / 100, 2) * 0.06;
 
 /* =====================================================================
    AUDIO OUT
@@ -385,18 +385,24 @@ const Mic = {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('unsupported');
     ensureAudio();
     try { if (navigator.audioSession) navigator.audioSession.type = 'play-and-record'; } catch(e){}
-    this.stream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false, noiseSuppression:false, autoGainControl:false}});
+    // Boost (auto gain) lets the phone raise quiet, far-away sound; echo cancel / noise suppression stay off because they eat music.
+    this.stream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false, noiseSuppression:false, autoGainControl:cfg.boost !== false}});
     ensureAudio();
     const src = ac.createMediaStreamSource(this.stream);
+    // band-pass to the piano's range so room rumble and hiss don't drown out distant notes
+    const hp = ac.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 180; hp.Q.value = 0.7;
+    const lp = ac.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 2600; lp.Q.value = 0.7;
+    this.pre = ac.createGain(); this.pre.gain.value = 4;
     this.an = ac.createAnalyser(); this.an.fftSize = 2048; this.an.smoothingTimeConstant = 0;
-    src.connect(this.an);
+    src.connect(hp); hp.connect(lp); lp.connect(this.pre); this.pre.connect(this.an);
     this.sr = ac.sampleRate; this.buf = new Float32Array(2048);
     const tauMax = Math.min(Math.floor(this.sr / 70), 2048 - 1024 - 2);
     this.d = new Float32Array(tauMax + 2); this.c = new Float32Array(tauMax + 2);
-    this.gate = gateFromSens();
+    this.floor = 0; this.hist = [];
     this.on = true;
     return true;
   },
+  async restart(){ this.stop(); return this.start(); },
   stop(){
     try { this.stream && this.stream.getTracks().forEach(t => t.stop()); } catch(e){}
     this.on = false; this.stream = null; this.an = null;
@@ -414,16 +420,16 @@ const Mic = {
     for (let tau = 1; tau <= tauMax; tau++){ run += d[tau]; c[tau] = run > 0 ? d[tau] * tau / run : 1; }
     let tau = -1;
     for (let t = tauMin; t < tauMax; t++){
-      if (c[t] < 0.15){ while (t + 1 < tauMax && c[t + 1] < c[t]) t++; tau = t; break; }
+      if (c[t] < 0.22){ while (t + 1 < tauMax && c[t + 1] < c[t]) t++; tau = t; break; }
     }
     if (tau < 0) return null;
     const x0 = c[tau - 1], x1 = c[tau], x2 = c[tau + 1], den = 2 * (2 * x1 - x2 - x0);
     const bt = Math.abs(den) > 1e-9 ? tau + (x2 - x0) / den : tau;
     return {f: sr / bt, conf: 1 - x1};
   },
-  emit(m, t0){
+  emit(m, t0, conf){
     this.lastMidi = m; this.heard = m; this.heardAt = performance.now();
-    if (this.onNote) this.onNote(m, t0);
+    if (this.onNote) this.onNote(m, t0, conf == null ? 0.9 : conf);
   },
   tick(now){
     if (!this.on || !this.an) return;
@@ -432,27 +438,33 @@ const Mic = {
     for (let i = 0; i < b.length; i++) s += b[i] * b[i];
     const rms = Math.sqrt(s / b.length);
     this.rms = rms; this.level = Math.max(rms, this.level * 0.88);
+    // track the room's background level: drops fast, rises slowly (so notes don't count as "background")
+    if (!this.floor) this.floor = rms || 0.0005;
+    else if (rms < this.floor) this.floor = this.floor * 0.85 + rms * 0.15;
+    else this.floor = this.floor * 0.9993 + rms * 0.0007;
+    // the gate sits just above the background; higher sensitivity = closer to it
+    this.gate = Math.max(0.0008, this.floor * lerp(6, 1.6, clamp(cfg.sens, 0, 100) / 100));
     const quiet = now < this.ignoreUntil;
     const h = this.hist;
     const minRecent = h.length ? Math.min.apply(null, h.slice(-4)) : 0;
-    if (!quiet && !this.pending && rms > this.gate && rms > minRecent * 1.35 + 0.0008 && now - this.lastOnset > 85){
-      this.pending = {t0:now, f:[]}; this.lastOnset = now; this.cand = null;
+    if (!quiet && !this.pending && rms > this.gate && rms > minRecent * 1.22 + this.floor * 0.25 && now - this.lastOnset > 85){
+      this.pending = {t0:now, f:[], c:[]}; this.lastOnset = now; this.cand = null;
     }
     h.push(rms); if (h.length > 6) h.shift();
     if (this.pending){
       const p = this.pending;
-      if (now - p.t0 >= 22){ const r = this.yin(); if (r && r.conf > 0.8 && r.f > 70 && r.f < 2200) p.f.push(r.f); }
-      if (p.f.length >= 2 || now - p.t0 > 150){
+      if (now - p.t0 >= 20){ const r = this.yin(); if (r && r.conf > 0.7 && r.f > 70 && r.f < 2200){ p.f.push(r.f); p.c.push(r.conf); } }
+      if (p.f.length >= 3 || (p.f.length >= 2 && now - p.t0 > 70) || now - p.t0 > 170){
         if (p.f.length){
-          const f = p.f.slice().sort((a,b) => a - b)[Math.floor(p.f.length / 2)];
-          this.emit(69 + 12 * Math.log2(f / 440), p.t0);
+          const idx = p.f.map((f, i) => i).sort((a, b) => p.f[a] - p.f[b])[Math.floor(p.f.length / 2)];
+          this.emit(69 + 12 * Math.log2(p.f[idx] / 440), p.t0, Math.max.apply(null, p.c));
         }
         this.pending = null;
       }
-    } else if (!quiet && rms > this.gate * 1.5 && (this.frame++ % 3 === 0)){
+    } else if (!quiet && rms > this.gate * 1.3 && (this.frame++ % 3 === 0)){
       // a new pitch while the sound keeps going (no clear attack)
       const r = this.yin();
-      if (r && r.conf > 0.9 && r.f > 70 && r.f < 2200){
+      if (r && r.conf > 0.88 && r.f > 70 && r.f < 2200){
         const m = 69 + 12 * Math.log2(r.f / 440);
         const diff = this.lastMidi == null ? 99 : Math.abs(m - this.lastMidi);
         if (diff > 0.7 && Math.abs(diff - 12) > 0.7 && Math.abs(diff - 24) > 0.7){
@@ -605,7 +617,7 @@ function played(p){
       hitNote(n, null, p); s.ni++;
       if (s.t < n.start) s.t = n.start;
       s.waiting = false;
-    } else wrongNote(n, p);
+    } else if (p.src !== 'mic' || p.conf >= 0.86) wrongNote(n, p);
     return;
   }
   const B = bps(), W = winBeats();
@@ -619,7 +631,7 @@ function played(p){
   }
   if (best){ hitNote(best, (tAt - best.start) / B, p); return; }
   const near = s.notes.find(n => !n.judged && Math.abs(n.start - tAt) <= W);
-  if (near) wrongNote(near, p);
+  if (near && (p.src !== 'mic' || p.conf >= 0.86)) wrongNote(near, p);
 }
 function hitNote(n, dSec, p){
   const s = state;
@@ -1463,11 +1475,11 @@ window.addEventListener('keydown', e => {
 });
 window.addEventListener('keyup', e => { const m = KEYMAP[(e.key || '').toLowerCase()]; if (m != null) fx(m).down = false; });
 
-Mic.onNote = (m, t0) => {
+Mic.onNote = (m, t0, conf) => {
   if (setupOpen){ setupNote(m); return; }
   if (cfg.input !== 'mic') return;
   const adj = m - cfg.offset, mr = Math.round(adj);
-  played({pc:pcOf(mr), midi:mr, when:t0 - cfg.latency, src:'mic'});
+  played({pc:pcOf(mr), midi:mr, when:t0 - cfg.latency, src:'mic', conf});
 };
 
 startBtn.addEventListener('click', toggleRun);
@@ -1527,7 +1539,6 @@ function renderSetup(){
 function syncAdv(){
   $('sensVal').textContent = cfg.sens + '%';
   $('latVal').textContent = cfg.latency + ' ms';
-  Mic.gate = gateFromSens();
 }
 $('sens').addEventListener('input', e => { cfg.sens = +e.target.value; saveCfg(); syncAdv(); });
 $('lat').addEventListener('input', e => { cfg.latency = +e.target.value; saveCfg(); syncAdv(); });
@@ -1561,21 +1572,24 @@ $('setupRetune').addEventListener('click', () => { setupStep = 2; tuneHits = [];
 (() => {
   const off = document.createElement('button'); off.type = 'button'; off.className = 'chip'; off.textContent = 'Turn listening off';
   off.addEventListener('click', () => { Mic.stop(); cfg.input = 'tap'; saveCfg(); closeSetup(); });
-  $('setupAdv').append(off);
+  const boost = document.createElement('button'); boost.type = 'button'; boost.className = 'chip toggle'; boost.id = 'boostBtn';
+  boost.textContent = 'Mic boost (hear from farther away)';
+  boost.setAttribute('aria-pressed', String(cfg.boost !== false));
+  boost.addEventListener('click', async () => {
+    cfg.boost = !(cfg.boost !== false); saveCfg(); boost.setAttribute('aria-pressed', String(cfg.boost));
+    if (Mic.on){ try { await Mic.restart(); } catch(e){} }
+  });
+  $('setupAdv').append(boost, off);
 })();
 function setupTick(){
-  const lvl = clamp(Mic.level / 0.12, 0, 1);
+  const lvl = clamp(Math.sqrt(Mic.level / 0.3), 0, 1);
   $('setupLevel').style.width = (lvl * 100).toFixed(1) + '%';
-  $('setupGate').style.left = (clamp(Mic.gate / 0.12, 0, 1) * 100).toFixed(1) + '%';
+  $('setupGate').style.left = (clamp(Math.sqrt(Mic.gate / 0.3), 0, 1) * 100).toFixed(1) + '%';
   if (setupStep === 1){
     quietSamples.push(Mic.rms);
     if (performance.now() > quietUntil){
       const avg = quietSamples.reduce((a,b) => a + b, 0) / Math.max(1, quietSamples.length);
-      const g = gateFromSens();
-      if (avg * 3 > g){ // noisy room: lower sensitivity to sit above the noise
-        const want = clamp(avg * 3, 0.004, 0.064);
-        cfg.sens = clamp(Math.round((1 - Math.sqrt((want - 0.004) / 0.06)) * 100), 0, 100); saveCfg();
-      }
+      Mic.floor = Math.max(0.0003, avg); // start the background level from the room measurement
       syncAdv(); $('sens').value = cfg.sens;
       setupStep = 2; tuneHits = []; renderSetup();
     }
