@@ -49,6 +49,13 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--torch);outline-
 .brand h1 span{color:var(--flame);text-shadow:0 0 22px #ff6a1a,0 3px 0 #000a}
 .brand p{margin:4px 0 0;color:var(--muted);max-width:54ch;line-height:1.45;font-weight:700}
 .microw{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.kbpick{display:flex;align-items:center;gap:8px;font-weight:800;color:var(--sand);font-size:15px}
+.kbpick select{font:inherit;font-size:15px;font-weight:800;color:var(--ink);background:#ffffff12;border:1px solid #ffffff2a;border-radius:999px;padding:8px 12px}
+.kbmap{display:flex;flex-direction:column;gap:4px}
+.kbmap svg{width:100%;height:auto;display:block}
+.kbmap small{color:var(--muted);font-weight:700;font-size:12.5px;line-height:1.35}
+@media (max-height:520px){ #intro .card{max-width:620px} #introTip{display:none} .kbmap svg{max-height:34px} .kbmap{flex-direction:row;align-items:center;gap:10px} .kbmap svg{flex:1.3} .kbmap small{flex:1} }
+.song[disabled]{opacity:.45;cursor:not-allowed}
 .cat{display:flex;flex-direction:column;gap:10px}
 .cat h2{margin:6px 0 0;font-family:var(--display);font-weight:400;font-size:30px;color:var(--sand);line-height:1}
 .cat h2 small{font-family:var(--body);font-size:13px;color:var(--muted);font-weight:700;margin-left:8px}
@@ -142,9 +149,12 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--torch);outline-
   <div class="menu-inner">
     <header class="brand">
       <h1>Castaway Keys <span>Live</span></h1>
-      <p>Play your real piano. The island listens, scores every note, and sets the shore on fire when you get a streak going.</p>
+      <p>Play your real keyboard. The island listens (or reads it over USB), scores every note, and sets the shore on fire when you get a streak going.</p>
     </header>
     <div class="microw">
+      <label class="kbpick" for="kbSel">Keyboard
+        <select id="kbSel"></select></label>
+      <button id="menuMidi" class="chip mic big" type="button" data-on="false" hidden>🎹 Connect by USB</button>
       <button id="menuMic" class="chip mic big" type="button" data-on="false">🎤 Set up listening</button>
       <span id="menuMicNote" style="color:var(--muted);font-weight:700;font-size:14px"></span>
     </div>
@@ -174,6 +184,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--torch);outline-
       <div class="card">
         <h3 id="introTitle"></h3>
         <p class="meta" id="introMeta"></p>
+        <div id="introMap" class="kbmap"></div>
         <p id="introTip"></p>
         <div class="actions">
           <button id="introStart" class="chip primary big" type="button">▶ Play</button>
@@ -269,35 +280,76 @@ const SONGS = [
   {id:'green', cat:'weird', name:'Greensleeves', sub:'500-year-old moody ballad', level:3, bpm:170,
    score:"A | C':2 D':1 | E':1.5 F':.5 E':1 | D':2 B:1 | G:1.5 A:.5 B:1 | C':2 A:1 | A:1.5 G#:.5 A:1 | B:2 G#:1 | E:2 A:1 | C':2 D':1 | E':1.5 F':.5 E':1 | D':2 B:1 | G:1.5 A:.5 B:1 | C':1.5 B:.5 A:1 | G#:1.5 F#:.5 G#:1 | A:3"},
   {id:'shave', cat:'weird', name:'Shave and a Haircut', sub:'Seven notes. Infinite sass', level:1, bpm:100,
-   score:"C' G:.5 G:.5 A G | R B C':2"}
+   score:"C' G:.5 G:.5 A G | R B C':2"},
+  {id:'funeral', cat:'weird', name:'Funeral March', sub:'Chopin, 1839. Dramatically doomed', level:2, bpm:60,
+   score:"Bb,:1 Bb,:.75 Bb,:.25 Bb,:2 | Db:1 C:.75 C:.25 Bb,:1 A,:.75 Bb,:.25 | Bb,:4 | Bb,:1 Bb,:.75 Bb,:.25 Bb,:2 | Db:1 C:.75 C:.25 Bb,:1 A,:.75 Bb,:.25 | Bb,:4"},
+
+  {id:'lullaby', cat:'campfire', name:"Brahms' Lullaby", sub:'The one every music box plays', level:1, bpm:90,
+   score:"E:.5 E:.5 | G:2 E:.5 E:.5 | G:2 E:.5 G:.5 | C':1 B:1.5 A:.5 | A:1 G:1 D:.5 E:.5 | F:1 D:1 D:.5 E:.5 | F:2 D:.5 F:.5 | B:.5 A:.5 G:1 B:1 | C':3"},
+  {id:'yankee', cat:'campfire', name:'Yankee Doodle', sub:'Goes below middle C for the first time', level:1, bpm:120,
+   score:"C C D E | C E D G, | C C D E | C:2 B,:2 | C C D E | F E D C | B, G, A, B, | C:2 C:2"},
+  {id:'auld', cat:'campfire', name:'Auld Lang Syne', sub:'Scottish, 1788. New Year’s Eve', level:2, bpm:90,
+   score:"C | F:1.5 F:.5 F A | G:1.5 F:.5 G A | F:1.5 F:.5 A C' | D':3 D' | C':1.5 A:.5 A F | G:1.5 F:.5 G A | F:1.5 D:.5 D C | F:3"},
+  {id:'susanna', cat:'campfire', name:'Oh! Susanna', sub:'Stephen Foster, 1848', level:2, bpm:110,
+   score:"C:.5 D:.5 | E G G:1.5 A:.5 | G E C:1.5 D:.5 | E E D C | D:3 C:.5 D:.5 | E G G:1.5 A:.5 | G E C:1.5 D:.5 | E E D D | C:4"},
+  {id:'camptown', cat:'campfire', name:'Camptown Races', sub:'Stephen Foster, 1850. Doo-dah', level:2, bpm:120,
+   score:"G:.5 G:.5 E:.5 G:.5 A:.5 G:.5 E:1 | E:.5 D:1.5 E:.5 D:1.5 | G:.5 G:.5 E:.5 G:.5 A:.5 G:.5 E:1 | D:.5 D:.5 E:.5 D:.5 C:2"},
+  {id:'cucaracha', cat:'campfire', name:'La Cucaracha', sub:'Mexican folk song', level:2, bpm:120,
+   score:"C:.5 C:.5 C:.5 F:1.5 A:1 | C:.5 C:.5 C:.5 F:1.5 A:2 | F:.5 F:.5 E:.5 E:.5 D:.5 D:.5 C:2 | C:.5 C:.5 C:.5 E:1.5 G:1 | C:.5 C:.5 C:.5 E:1.5 G:2 | C':.5 D':.5 C':.5 A#:.5 A:.5 G:.5 F:2"},
+  {id:'scarborough', cat:'campfire', name:'Scarborough Fair', sub:'Old English ballad. Moody', level:2, bpm:100,
+   score:"D:2 D | A:2 A | E:1.5 F:.5 E | D:3 | A C':2 | D':2 C' | A B G | A:3 | D':2 D' | D':2 C' | A A G | F E C | D:2 A | G F:2 | E D C | D:3"},
+
+  {id:'turkish', cat:'classical', name:'Turkish March', sub:'Mozart, 1783. Fast fingers', level:3, bpm:100,
+   score:"B:.25 A:.25 G#:.25 A:.25 | C':1 D':.25 C':.25 B:.25 C':.25 | E':1 F':.25 E':.25 D#':.25 E':.25 | B':.25 A':.25 G#':.25 A':.25 B':.25 A':.25 G#':.25 A':.25 | C'':2 B:.25 A:.25 G#:.25 A:.25 | C':1 D':.25 C':.25 B:.25 C':.25 | E':1 F':.25 E':.25 D#':.25 E':.25 | B':.25 A':.25 G#':.25 A':.25 B':.25 A':.25 G#':.25 A':.25 | C'':2"},
+  {id:'canon', cat:'classical', name:'Canon in D', sub:'Pachelbel. Every wedding ever', level:2, bpm:70,
+   score:"F#':2 E':2 | D':2 C#':2 | B:2 A:2 | B:2 C#':2 | D':2 C#':2 | B:2 A:2 | G:2 F#:2 | G:2 E:2 | D F# A G | F# D F# E | D B, D A | G B A G | F#:4"},
+  {id:'minuet', cat:'classical', name:'Minuet in G', sub:'From Bach’s notebook, 1725', level:2, bpm:110,
+   score:"D':1 G:.5 A:.5 B:.5 C':.5 | D':1 G:1 G:1 | E':1 C':.5 D':.5 E':.5 F#':.5 | G':1 G:1 G:1 | C':1 D':.5 C':.5 B:.5 A:.5 | B:1 C':.5 B:.5 A:.5 G:.5 | F#:1 G:.5 A:.5 B:.5 G:.5 | A:3 | D':1 G:.5 A:.5 B:.5 C':.5 | D':1 G:1 G:1 | E':1 C':.5 D':.5 E':.5 F#':.5 | G':1 G:1 G:1 | C':1 D':.5 C':.5 B:.5 A:.5 | B:1 C':.5 B:.5 A:.5 G:.5 | A:1 B:.5 A:.5 G:.5 F#:.5 | G:3"},
+  {id:'morning', cat:'classical', name:'Morning Mood', sub:'Grieg, 1875. Sunrise in a song', level:2, bpm:80,
+   score:"G:.75 E:.25 D:.5 C:.5 D:.5 E:.5 | G:.75 E:.25 D:.5 C:.5 D:.25 E:.25 D:.25 E:.25 | G:.75 E:.25 G:.5 A:.5 E:.5 A:.5 | G:.75 E:.25 D:.5 C:1.5"},
+  {id:'nacht', cat:'classical', name:'Eine kleine Nachtmusik', sub:'Mozart, 1787. The famous opening', level:2, bpm:110,
+   score:"G D G:.5 D:.5 G:.5 B:.5 | D':2 R:2 | C' A C':.5 A:.5 F#:.5 A:.5 | D:2 R:2 | G D G:.5 D:.5 G:.5 B:.5 | D':2 R:2 | C' A C':.5 A:.5 F#:.5 A:.5 | D:4"},
+  {id:'prelude', cat:'classical', name:'Prelude in C', sub:'Bach, 1722. Rolling arpeggios, both octaves', level:2, bpm:100,
+   score:"C:.5 E:.5 G:.5 C':.5 E':.5 G:.5 C':.5 E':.5 C:.5 E:.5 G:.5 C':.5 E':.5 G:.5 C':.5 E':.5 | C:.5 D:.5 A:.5 D':.5 F':.5 A:.5 D':.5 F':.5 C:.5 D:.5 A:.5 D':.5 F':.5 A:.5 D':.5 F':.5 | B,:.5 D:.5 G:.5 D':.5 F':.5 G:.5 D':.5 F':.5 B,:.5 D:.5 G:.5 D':.5 F':.5 G:.5 D':.5 F':.5 | C:.5 E:.5 G:.5 C':.5 E':.5 G:.5 C':.5 E':.5 C:.5 E:.5 G:.5 C':.5 E':.5 G:.5 C':.5 E':2"}
 ];
 const CATS = [
   {id:'starter', name:'Island classics', note:'start here'},
+  {id:'campfire', name:'Campfire songs', note:'folk tunes everyone knows'},
   {id:'bangers', name:'Bangers', note:'harder, way more fun'},
+  {id:'classical', name:'Classical greats', note:'the famous bits'},
   {id:'weird', name:'Weird ones', note:'spooky, salty, sassy'}
 ];
 
 const NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
 const BASE = {C:0,D:2,E:4,F:5,G:7,A:9,B:11};
 const COLORS = {C:'#e8433a',D:'#f2672e',E:'#f7a02b',F:'#f4cb2f',G:'#2f8fd8',A:'#d8437e',B:'#6b46b8'};
-const WHITES = [60,62,64,65,67,69,71,72,74,76,77,79,81,83,84];
-const BLACKS = [61,63,66,68,70,73,75,78,80,82];
+// Which keyboard you play on. The screen shows only the part of it each song needs.
+const KEYBOARDS = {
+  casio76: {name:'76 keys (Casio WK-210)', lo:28, hi:103},
+  k61:     {name:'61 keys', lo:36, hi:96},
+  k88:     {name:'88 keys', lo:21, hi:108},
+  toy:     {name:'2-octave toy piano', lo:60, hi:84}
+};
+let WHITES = [], BLACKS = [];
+function setWindow(lo, hi){ WHITES = []; BLACKS = []; for (let m = lo; m <= hi; m++) (isBlack(m) ? BLACKS : WHITES).push(m); }
 const pcOf = m => ((Math.round(m) % 12) + 12) % 12;
 const isBlack = m => [1,3,6,8,10].includes(pcOf(m));
 const letterOf = m => NAMES[pcOf(m)];
 const colorOf = m => COLORS[NAMES[pcOf(m)][0]];
-const labelOf = m => letterOf(m) + (m >= 84 ? "''" : m >= 72 ? "'" : "");
+const octOf = m => Math.floor(Math.round(m) / 12) - 1;
+const labelOf = m => letterOf(m) + octOf(m);   // C4 = middle C
 const darkText = m => ['F','E'].includes(letterOf(m));
 
 function parse(score){
   const notes = []; let t = 0, bar = 1;
   for (const tok of score.trim().split(/\s+/)){
     if (tok === '|'){ bar++; continue; }
-    const m = tok.match(/^([A-GR])(#|b)?('*)(?::([\d.]+))?$/);
+    // ' = octave up, , = octave down; plain letters sit in the octave starting at middle C
+    const m = tok.match(/^([A-GR])(#|b)?('*)(,*)(?::([\d.]+))?$/);
     if (!m) continue;
-    const d = m[4] ? parseFloat(m[4]) : 1;
+    const d = m[5] ? parseFloat(m[5]) : 1;
     if (m[1] !== 'R'){
-      const midi = 60 + BASE[m[1]] + (m[2] === '#' ? 1 : m[2] === 'b' ? -1 : 0) + 12 * m[3].length;
+      const midi = 60 + BASE[m[1]] + (m[2] === '#' ? 1 : m[2] === 'b' ? -1 : 0) + 12 * m[3].length - 12 * m[4].length;
       notes.push({midi, start:t, dur:d, bar});
     }
     t += d;
@@ -310,9 +362,27 @@ const store = {
   get(k, d){ try { const v = localStorage.getItem('ckl:' + k); return v == null ? d : JSON.parse(v); } catch(e){ return d; } },
   set(k, v){ try { localStorage.setItem('ckl:' + k, JSON.stringify(v)); } catch(e){} }
 };
-const cfg = Object.assign({wait:false, input:'tap', tempo:0.7, latency:90, sens:85, boost:true, offset:0, tuned:false, v:2}, store.get('cfg', {}));
+const cfg = Object.assign({kb:'casio76', wait:false, input:'tap', tempo:0.7, latency:90, sens:85, boost:true, offset:0, tuned:false, v:2}, store.get('cfg', {}));
 if (cfg.v !== 2){ cfg.sens = 85; cfg.boost = true; cfg.v = 2; }
 const saveCfg = () => store.set('cfg', cfg);
+const KB = () => KEYBOARDS[cfg.kb] || KEYBOARDS.casio76;
+// octave shift that makes a song fit your keyboard (null = needs more keys)
+function fitShift(notes){
+  const kb = KB(), lo = Math.min(...notes.map(n => n.midi)), hi = Math.max(...notes.map(n => n.midi));
+  for (const sh of [0, 12, -12, 24, -24]) if (lo + sh >= kb.lo && hi + sh <= kb.hi) return sh;
+  return null;
+}
+// which keys to draw: the song's range rounded out to whole octaves, at least two octaves wide
+function windowFor(notes){
+  const kb = KB();
+  if (cfg.kb === 'toy') return [60, 84];
+  let lo = Math.min(...notes.map(n => n.midi)), hi = Math.max(...notes.map(n => n.midi));
+  lo -= pcOf(lo); hi += (12 - pcOf(hi)) % 12;
+  while (hi - lo < 24){ if ((lo + hi) / 2 < 66) hi += 12; else lo -= 12; }
+  lo = Math.max(lo, kb.lo); hi = Math.min(hi, kb.hi);
+  while (isBlack(lo)) lo++; while (isBlack(hi)) hi--;
+  return [lo, hi];
+}
 
 /* =====================================================================
    AUDIO OUT
@@ -558,7 +628,12 @@ function syncControls(){
   const mm = $('menuMic');
   mm.dataset.on = String(on);
   mm.textContent = on ? '🎤 Listening: tap to adjust' : (cfg.tuned ? '🎤 Turn on listening' : '🎤 Set up listening');
-  $('menuMicNote').textContent = on ? 'Play your real piano. Tapping the screen works too.' : 'Or just tap the on-screen keys.';
+  const usb = !!window.__midiOn;
+  const mb = $('menuMidi');
+  if (mb){ mb.dataset.on = String(usb); mb.textContent = usb ? '🎹 USB keyboard connected' : '🎹 Connect by USB'; }
+  if (usb && cfg.input === 'midi'){ micBtn.dataset.on = 'true'; micBtn.textContent = '🎹 USB'; }
+  $('menuMicNote').textContent = usb && cfg.input === 'midi' ? `Reading your keys directly from ${window.__midiName || 'your keyboard'}.`
+    : on ? 'Play your real piano. Tapping the screen works too.' : 'Or just tap the on-screen keys.';
 }
 
 /* =====================================================================
@@ -574,7 +649,9 @@ const winBeats = () => clamp(0.3 * bps(), 0.25, 0.5);
 function newState(idx, section){
   const song = SONGS[idx];
   const parsed = parse(song.score);
-  let notes = parsed.notes.map(n => Object.assign({}, n, {judged:null, played:false, wrongs:0}));
+  const sh = fitShift(parsed.notes) || 0;
+  let notes = parsed.notes.map(n => Object.assign({}, n, {midi:n.midi + sh, judged:null, played:false, wrongs:0}));
+  const win = windowFor(notes); setWindow(win[0], win[1]);
   if (section){
     notes = notes.filter(n => n.bar >= section.from && n.bar <= section.to);
     const shift = notes.length ? notes[0].start : 0;
@@ -597,8 +674,9 @@ function openSong(idx, section){
   resetFx();
   $('songTitle').textContent = SONGS[idx].name + (section ? ` · bars ${section.from}–${section.to}` : '');
   $('introTitle').textContent = section ? `Practice bars ${section.from}–${section.to}` : SONGS[idx].name;
-  const keys = [...new Set(state.notes.map(n => n.midi))].sort((a,b) => a - b).map(labelOf);
-  $('introMeta').textContent = `${state.notes.length} notes · keys: ${keys.join(' ')}`;
+  const ms = [...new Set(state.notes.map(n => n.midi))].sort((a,b) => a - b);
+  $('introMeta').textContent = `${state.notes.length} notes · ${ms.length} different keys · ${labelOf(ms[0])} to ${labelOf(ms[ms.length - 1])}`;
+  $('introMap').innerHTML = keyboardMap(ms);
   const listening = Mic.on && cfg.input === 'mic';
   $('introTip').textContent = section
     ? 'This part loops. Get it clean and the speed goes up 5% each time.'
@@ -677,7 +755,7 @@ function played(p){
     if (s.t < -0.4) return;
     const n = s.notes[s.ni]; if (!n) return;
     if (n.start - s.t > 1.5) return;
-    if (p.pc === pcOf(n.midi)){
+    if (p.src === 'midi' ? p.midi === n.midi : p.pc === pcOf(n.midi)){
       hitNote(n, null, p); s.ni++;
       if (s.t < n.start) s.t = n.start;
       s.waiting = false;
@@ -691,7 +769,8 @@ function played(p){
     if (n.start - tAt > W) break;
     if (n.judged) continue;
     const dd = Math.abs(n.start - tAt);
-    if (dd <= W && pcOf(n.midi) === p.pc && dd < bd){ best = n; bd = dd; }
+    const same = p.src === 'midi' ? p.midi === n.midi : pcOf(n.midi) === p.pc;
+    if (dd <= W && same && dd < bd){ best = n; bd = dd; }
   }
   if (best){ hitNote(best, (tAt - best.start) / B, p); return; }
   const near = s.notes.find(n => !n.judged && Math.abs(n.start - tAt) <= W);
@@ -733,12 +812,14 @@ function wrongNote(n, p){
   s.conf[key] = (s.conf[key] || 0) + 1;
   breakStreak();
   let m = p.midi;
-  if (m == null || m < 60 || m > 84 || pcOf(m) !== p.pc){
-    m = n.midi - ((pcOf(n.midi) - p.pc + 12) % 12); if (m < 60) m += 12; if (n.midi - m > 6 && m + 12 <= 84) m += 12;
+  const wlo = WHITES[0], whi = WHITES[WHITES.length - 1];
+  if (m == null || m < wlo || m > whi || pcOf(m) !== p.pc){
+    m = n.midi - ((pcOf(n.midi) - p.pc + 12) % 12); if (m < wlo) m += 12; if (n.midi - m > 6 && m + 12 <= whi) m += 12;
   }
   fx(m).wrong = performance.now();
   const k = keyX(n.midi);
-  addPopup('Wrong note', `you played ${NAMES[p.pc]} · need ${letterOf(n.midi)}`, clamp(k.x + k.w / 2, 90, cw - 90), G.hitY - G.W * 1.5, '#ff6a5a', 0.95);
+  const sameNote = p.pc === pcOf(n.midi) && p.midi != null;
+  addPopup(sameNote ? 'Wrong octave' : 'Wrong note', sameNote ? `that ${letterOf(n.midi)} is ${p.midi > n.midi ? 'too high' : 'too low'} · play ${labelOf(n.midi)}` : `you played ${NAMES[p.pc]} · need ${letterOf(n.midi)}`, clamp(k.x + k.w / 2, 90, cw - 90), G.hitY - G.W * 1.5, '#ff6a5a', 0.95);
 }
 function missNote(n){
   const s = state;
@@ -889,7 +970,7 @@ function layout(){
   dpr = Math.min(window.devicePixelRatio || 1, 2);
   cw = r.width; ch = r.height;
   cv.width = Math.round(cw * dpr); cv.height = Math.round(ch * dpr);
-  const W = cw / 15;
+  const W = cw / WHITES.length;
   const kbH = clamp(ch * 0.28, 92, 210);
   const stripH = clamp(W * 0.75, 15, 24);
   const kbTop = ch - kbH;
@@ -920,7 +1001,7 @@ function keyAt(x, y){
   if (y >= G.keyTop && y < G.keyTop + G.blackH + 4){
     for (const b of BLACKS){ const k = keyX(b); if (x >= k.x - 1 && x <= k.x + k.w + 1) return b; }
   }
-  return WHITES[clamp(Math.floor(x / G.W), 0, 14)];
+  return WHITES[clamp(Math.floor(x / G.W), 0, WHITES.length - 1)];
 }
 
 /* ---------- static background ---------- */
@@ -1007,7 +1088,7 @@ function buildBg(){
     b.beginPath(); b.moveTo(k.x, hitY); b.lineTo(PX(k.x, 18), yBand); b.lineTo(PX(k.x + k.w, 18), yBand); b.lineTo(k.x + k.w, hitY); b.closePath(); b.fill();
   }
   b.strokeStyle = 'rgba(170,225,240,.07)'; b.lineWidth = 1;
-  for (let i = 1; i < 15; i++){ const x = i * W; b.beginPath(); b.moveTo(x, hitY); b.lineTo(PX(x, 18), yBand); b.stroke(); }
+  for (let i = 1; i < WHITES.length; i++){ const x = i * W; b.beginPath(); b.moveTo(x, hitY); b.lineTo(PX(x, 18), yBand); b.stroke(); }
   // wet edges of the channel
   b.strokeStyle = 'rgba(200,240,250,.22)'; b.lineWidth = 1.5;
   b.beginPath(); b.moveTo(0, hitY); b.lineTo(PX(0, 18), yBand); b.moveTo(cw, hitY); b.lineTo(PX(cw, 18), yBand); b.stroke();
@@ -1038,6 +1119,7 @@ function buildBg(){
     cg.addColorStop(0, mix(colorOf(m), '#ffffff', 0.25)); cg.addColorStop(1, colorOf(m));
     b.fillStyle = cg; rr(b, cx - sq / 2, cy - sq / 2, sq, sq, 3); b.fill();
     b.fillStyle = darkText(m) ? '#2a1a05' : '#fff'; b.fillText(letterOf(m), cx, cy + 1);
+    if (m === 60){ b.strokeStyle = '#fff'; b.lineWidth = 2; rr(b, cx - sq / 2 - 2, cy - sq / 2 - 2, sq + 4, sq + 4, 4); b.stroke(); }
   }
   b.fillStyle = '#121212';
   for (const m of BLACKS){ const k = keyX(m); rr(b, k.x + k.w * 0.22, G.kbTop + 3, k.w * 0.56, G.stripH - 6, 2); b.fill(); }
@@ -1253,7 +1335,7 @@ function drawKeys(now){
   const tg = targets(), pulse = reduced ? 1 : 0.5 + 0.5 * Math.sin(now * 0.009);
   const isDown = f => f.down || now - f.press < 140;
   // white keys
-  for (let i = 0; i < 15; i++){
+  for (let i = 0; i < WHITES.length; i++){
     const m = WHITES[i], x = i * W + 0.75, w = W - 1.5, f = fx(m), dn = isDown(f) ? 2.5 : 0;
     const top = keyTop + dn, h = kh - lip - 1;
     const g = ctx.createLinearGradient(0, top, 0, top + h);
@@ -1263,6 +1345,11 @@ function drawKeys(now){
     lg.addColorStop(0, '#c2b598'); lg.addColorStop(1, '#8f8268');
     ctx.fillStyle = lg; rr(ctx, x, top + h - dn - 2, w, ch - (top + h - dn - 2) - 1, 0, 0, 4, 4); ctx.fill();
     ctx.fillStyle = 'rgba(255,255,255,.6)'; ctx.fillRect(x + w - 1.5, top + 2, 1, h - 8);
+    if (pcOf(m) === 0){
+      const fsz = clamp(W * 0.42, 8, 13), ly = top + h - dn - fsz * 0.9;
+      ctx.font = `900 ${fsz}px Nunito, sans-serif`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = m === 60 ? '#c2412f' : '#8f8268'; ctx.fillText(labelOf(m), x + w / 2, ly);
+    }
     if (tg.has(m)){
       const cg = ctx.createLinearGradient(0, top, 0, top + h * 0.85);
       cg.addColorStop(0, rgba(colorOf(m), 0.75 * (0.5 + 0.5 * pulse))); cg.addColorStop(1, rgba(colorOf(m), 0));
@@ -1588,7 +1675,7 @@ function renderSetup(){
   } else if (setupStep >= 2 && setupStep <= 4){
     setSteps(setupStep);
     const m = TUNE[setupStep - 2];
-    msg.innerHTML = `Now play <strong style="color:${colorOf(m)}">${letterOf(m)}</strong> (the ${setupStep === 2 ? 'leftmost C' : setupStep === 3 ? 'first E' : 'first G'}) once, nice and firm. This tunes the app to your piano.`;
+    msg.innerHTML = `Now play <strong style="color:${colorOf(m)}">${letterOf(m)}</strong> (${cfg.kb === 'toy' ? (setupStep === 2 ? 'the leftmost C' : setupStep === 3 ? 'the first E' : 'the first G') : (setupStep === 2 ? 'middle C, ' + middleCHint() : setupStep === 3 ? 'the E just right of middle C' : 'the G just right of that')}) once, nice and firm. This tunes the app to your piano.`;
     go.hidden = true;
   } else if (setupStep === 5 || setupStep === 9){
     setSteps(5);
@@ -1702,17 +1789,88 @@ function renderMenu(){
       if (s.cat !== c.id) return;
       const {notes} = parse(s.score);
       const keys = new Set(notes.map(n => n.midi)).size;
+      const fits = fitShift(notes) != null;
       const b0 = best[s.id] || {stars:0, score:0};
       const el = document.createElement('button'); el.type = 'button'; el.className = 'song';
-      el.innerHTML = `<span class="name"></span>${s.sub ? '<span class="sub"></span>' : ''}<span class="meta"><span class="lvl l${s.level}">${['','Easy','Medium','Tricky'][s.level]}</span><span>${keys} keys</span><span class="best">${b0.score ? `<span>${b0.score.toLocaleString()}</span>` : ''}<span class="stars" aria-label="Best ${b0.stars} of 3 stars">${'★'.repeat(b0.stars)}${'☆'.repeat(3 - b0.stars)}</span></span></span>`;
+      el.innerHTML = `<span class="name"></span>${s.sub ? '<span class="sub"></span>' : ''}<span class="meta"><span class="lvl l${s.level}">${['','Easy','Medium','Tricky'][s.level]}</span><span>${fits ? keys + ' keys' : 'needs more keys'}</span><span class="best">${b0.score ? `<span>${b0.score.toLocaleString()}</span>` : ''}<span class="stars" aria-label="Best ${b0.stars} of 3 stars">${'★'.repeat(b0.stars)}${'☆'.repeat(3 - b0.stars)}</span></span></span>`;
       el.querySelector('.name').textContent = s.name;
       if (s.sub) el.querySelector('.sub').textContent = s.sub;
+      if (!fits) el.disabled = true;
       el.addEventListener('click', () => { ensureAudio(); state = null; openSong(i); });
       grid.append(el);
     });
     root.append(wrap);
   }
 }
+
+/* ---------- where is it on my keyboard? ---------- */
+function middleCHint(){
+  const kb = KB(); let n = 0;
+  for (let m = kb.lo; m <= 60; m++) if (pcOf(m) === 0) n++;
+  return `the ${['','1st','2nd','3rd','4th','5th'][n] || n + 'th'} C from the left`;
+}
+function keyboardMap(ms){
+  const kb = KB(), whites = [];
+  for (let m = kb.lo; m <= kb.hi; m++) if (!isBlack(m)) whites.push(m);
+  const w = 6, h = 30, W = whites.length * w;
+  const lo = ms[0], hi = ms[ms.length - 1], used = new Set(ms);
+  let svg = `<svg viewBox="0 0 ${W} ${h + 12}" role="img" aria-label="Your keyboard, with this song's keys highlighted">`;
+  whites.forEach((m, i) => {
+    const on = used.has(m), inR = m >= lo && m <= hi;
+    svg += `<rect x="${i * w + .3}" y="0" width="${w - .6}" height="${h}" rx="1" fill="${on ? colorOf(m) : inR ? '#f4e7c8' : '#cfc8b8'}" opacity="${inR ? 1 : .55}"/>`;
+    if (m === 60) svg += `<circle cx="${i * w + w / 2}" cy="${h + 6}" r="2.6" fill="#fff"/>`;
+  });
+  for (let m = kb.lo; m <= kb.hi; m++){
+    if (!isBlack(m)) continue;
+    const i = whites.indexOf(m - 1); if (i < 0) continue;
+    const on = used.has(m);
+    svg += `<rect x="${(i + 1) * w - 1.8}" y="0" width="3.6" height="${h * .6}" rx=".6" fill="${on ? colorOf(m) : '#151515'}"/>`;
+  }
+  svg += '</svg>';
+  const tip = cfg.kb === 'toy' ? 'Colored keys are the ones this song uses.'
+    : `Colored keys are the ones this song uses. The white dot is middle C (${middleCHint()}). Lowest note: ${labelOf(lo)}.`;
+  return svg + `<small>${tip}</small>`;
+}
+
+/* ---------- USB keyboard (Web MIDI: Chrome/Edge on a Mac, PC or Android) ---------- */
+const Midi = {
+  access:null, on:false, names:[],
+  supported(){ return typeof navigator.requestMIDIAccess === 'function'; },
+  async start(){
+    this.access = await navigator.requestMIDIAccess();
+    const attach = () => {
+      this.names = [];
+      this.access.inputs.forEach(inp => { inp.onmidimessage = e => this.msg(e); this.names.push(inp.name); });
+      this.on = this.names.length > 0;
+      window.__midiOn = this.on; window.__midiName = this.names[0];
+      syncControls();
+    };
+    attach(); this.access.onstatechange = attach;
+    return this.on;
+  },
+  msg(e){
+    const [st, note, vel] = e.data, type = st & 0xf0;
+    if (type === 0x90 && vel > 0){
+      ensureAudio();
+      const f = fx(note); f.down = true; f.press = performance.now();
+      if (cfg.input !== 'midi'){ cfg.input = 'midi'; saveCfg(); syncControls(); }
+      played({pc:pcOf(note), midi:note, when:(e.timeStamp && e.timeStamp > 0 && e.timeStamp <= performance.now() + 5) ? e.timeStamp : performance.now(), src:'midi'});
+    } else if (type === 0x80 || (type === 0x90 && vel === 0)){ fx(note).down = false; }
+  }
+};
+$('menuMidi').hidden = !Midi.supported();
+$('menuMidi').addEventListener('click', async () => {
+  try {
+    const ok = await Midi.start();
+    if (ok){ if (Mic.on) Mic.stop(); cfg.input = 'midi'; saveCfg(); }
+    syncControls();
+    if (!ok) $('menuMicNote').textContent = 'No USB keyboard found. Plug it in, turn it on, then tap again.';
+  } catch(err){ $('menuMicNote').textContent = 'The browser blocked USB keyboard access. Allow MIDI for this site and try again.'; }
+});
+const kbSel = $('kbSel');
+for (const [id, k] of Object.entries(KEYBOARDS)){ const o = document.createElement('option'); o.value = id; o.textContent = k.name; kbSel.append(o); }
+kbSel.value = cfg.kb in KEYBOARDS ? cfg.kb : 'casio76';
+kbSel.addEventListener('change', () => { cfg.kb = kbSel.value; saveCfg(); renderMenu(); });
 
 /* ---------- boot ---------- */
 buildSprites();
@@ -1725,7 +1883,7 @@ requestAnimationFrame(frame);
 setInterval(() => Mic.tick(performance.now()), 10);
 
 // test hook (used for automated checks; harmless otherwise)
-window.__ck = {get state(){ return state; }, played, Mic, cfg, openSong, begin};
+window.__ck = {get state(){ return state; }, played, Mic, Midi, cfg, openSong, begin, SONGS, parse, fitShift};
 })();
 </script>
 </body>
